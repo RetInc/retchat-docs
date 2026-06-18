@@ -1,11 +1,13 @@
 # Retchat Protocol Specification
 
-> Updated to reflect the current implementation as of 18th June 2026.
+> Updated to reflect the current implementation as of 18th June 2026.  
 > (Still AI-generated)
+
+---
 
 ## Overview
 
-Retchat is a TCP‑based chat protocol with application‑level encryption established via Diffie‑Hellman key exchange. All messages after the handshake are encrypted and authenticated using HMAC‑SHA256. The protocol is designed for real‑time messaging, supporting rooms, direct messages, and image sharing.
+Retchat is a TCP‑based chat protocol with application‑level encryption established via Diffie‑Hellman key exchange. After the DH key exchange, both sides exchange protocol version handshake packets to ensure compatibility. All subsequent messages are encrypted and authenticated using HMAC‑SHA256. The protocol is designed for real‑time messaging, supporting rooms, direct messages, and image sharing.
 
 ---
 
@@ -15,9 +17,9 @@ All communication runs over a plain TCP connection. The default port is **6677**
 
 ---
 
-## Encryption
+## Encryption & Handshake
 
-### Key Exchange
+### Diffie‑Hellman Key Exchange
 
 On connection, the server and client perform a Diffie‑Hellman key exchange using the **RFC 3526 2048‑bit MODP Group (Group 14)**:
 
@@ -54,6 +56,12 @@ The handshake sequence:
 The 32‑byte base encryption key is derived by computing **SHA‑256** over the raw bytes of the DH shared secret, **with all leading zero bytes stripped** (matching OpenSSL’s `BN_bn2bin` behaviour).  
 This ensures both sides derive an identical key even when the shared secret has different leading‑zero representations.
 
+### Protocol Version Handshake
+
+Immediately after the DH exchange, the **server** sends a `HANDSHAKE` packet (type `0x01`) containing its protocol version (16‑bit, big‑endian). The client must verify this version; if it matches, the client replies with its own `HANDSHAKE` packet containing its protocol version. If versions differ, the server may send a `SYSTEM_MSG` with code `12` (`MSG_VERSION_MISMATCH`) and then close the connection.
+
+The `HANDSHAKE` packet is **encrypted** using the derived key (like all subsequent frames). The payload is exactly two bytes (the version number).
+
 ### Per‑Message Encryption
 
 Each message uses a unique keystream derived from the base key and a monotonically increasing **per‑direction counter**:
@@ -78,7 +86,7 @@ If a received HMAC does not match the expected value, the connection is **immedi
 
 ## Frame Format
 
-After the handshake, all messages use this wire format:
+After the DH handshake, all messages use this wire format:
 
 ```
 +------------------+---------------------+------------------+
@@ -104,7 +112,7 @@ Decrypted frame layout:
 
 | Value  | Name              | Direction | Description                        |
 |--------|-------------------|-----------|------------------------------------|
-| `0x01` | `HANDSHAKE`       | —         | Reserved for DH exchange (raw TCP) |
+| `0x01` | `HANDSHAKE`       | both      | Protocol version exchange          |
 | `0x02` | `KEEPALIVE`       | both      | Ping                               |
 | `0x03` | `KEEPALIVE_ACK`   | both      | Pong                               |
 | `0x10` | `NICK_REQUEST`    | c→s       | Request a nickname change          |
@@ -134,6 +142,14 @@ All strings are **null‑terminated UTF‑8**. When serialized into a packet pay
 ---
 
 ## Packet Payloads
+
+### `0x01` HANDSHAKE (both)
+
+Payload: exactly 2 bytes – the protocol version as a **big‑endian 16‑bit unsigned integer**.
+
+- **Server** sends this first after DH exchange.
+- **Client** verifies the version; if matching, it replies with its own `HANDSHAKE`.
+- If versions differ, the server may send a `SYSTEM_MSG` (code 12) and then close the connection.
 
 ### `0x02` KEEPALIVE / `0x03` KEEPALIVE_ACK
 No payload.  
@@ -274,6 +290,7 @@ The server fills in `sender` before broadcasting to the room.
 | 9    | `MSG_JOIN_NAME_TAKEN`   | room                | Your nick is taken in the target room       |
 | 10   | `MSG_DM_TARGET_NOT_FOUND` | nick              | DM target user is not connected             |
 | 11   | `MSG_IMAGE_UNSUPPORTED` | mimeType            | Unsupported image MIME type                 |
+| **12**| **`MSG_VERSION_MISMATCH`** | clientVersion, serverVersion | Protocol versions differ                   |
 
 ---
 
@@ -357,9 +374,13 @@ Client                              Server
   |                                    |
   |<-- [uint32 len] [server pub key] --|   DH handshake (plaintext)
   |-- [uint32 len] [client pub key] -->|
-  |                                    |   Both derive base key via SHA‑256(shared_secret)
+  |                                    |   Both derive base key
   |                                    |
-  |<===== all frames encrypted =======>|
+  |<===== frames now encrypted =======>|
+  |                                    |
+  |<-- HANDSHAKE (version) ------------|   Server sends protocol version
+  |-- HANDSHAKE (version) ------------>|   Client replies if version matches
+  |                                    |   (else SYSTEM_MSG(12) + close)
   |                                    |
   |<-- SYSTEM_MSG (MSG_WELCOME) -------|   nick="usuarioN", room="lobby"
   |<-- JOIN_NOTIFY --------------------|   broadcast to lobby
